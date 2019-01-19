@@ -1,0 +1,144 @@
+############image fusion#########
+import tensorflow as tf
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+from scipy.optimize import fmin_l_bfgs_b
+
+w_content = 0.001
+height, width = 256, 256  # input image size
+n_iter = 5
+ImageA_PATH = 'D:/PythonLearn/Medical_Fuison/Picture/CT-1.bmp'
+ImageB_PATH = 'D:/PythonLearn/Medical_Fuison/Picture/CT-2.bmp'
+Blend_PATH = 'D:/PythonLearn/Medical_Fuison/Picture/CT-blend.bmp'
+OUTPUT_DIR = 'D:/PythonLearn/Medical_Fuison/Picture/'
+data_dict = 'D:/PythonLearn/Medical_Fuison/Models/vgg16.npy'
+
+def _max_pool(bottom, name):
+    return tf.nn.max_pool(bottom, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name=name)
+
+def _conv_layer(bottom, name):
+    with tf.variable_scope(name):  # in here, CNN's filter is constant, NOT Variable that can be trained
+        conv = tf.nn.conv2d(bottom, data_dict[name][0], [1, 1, 1, 1], padding='SAME')
+        lout = tf.nn.relu(tf.nn.bias_add(conv, data_dict[name][1]))
+        return lout
+
+tf_A = tf.placeholder(tf.float32,  [height*width])
+tf_B = tf.placeholder(tf.float32,  [height*width])
+tf_F = tf.placeholder(tf.float32,  [height*width])
+
+img_A = tf.reshape(tf_A, [1, height, width, 1])
+img_B = tf.reshape(tf_B, [1, height, width, 1])
+img_F = tf.reshape(tf_F, [1, height, width, 1])
+
+data_dict = np.load(data_dict, encoding='latin1').item()
+
+#VGG-16 input must be 3 dim
+bgr_A = tf.concat(axis=3, values=[
+    img_A,
+    img_A,
+    img_A,
+])
+bgr_B = tf.concat(axis=3, values=[
+    img_B,
+    img_B,
+    img_B,
+])
+bgr_F = tf.concat(axis=3, values=[
+    img_F,
+    img_F,
+    img_F,
+])
+# CNN Image A
+convA1_1 = _conv_layer(bgr_A, "conv1_1")
+convA1_2 = _conv_layer(convA1_1, "conv1_2")
+poolA1 = _max_pool(convA1_2, 'pool1')
+convA2_1 = _conv_layer(poolA1, "conv2_1")
+# convA2_2 = _conv_layer(convA2_1, "conv2_2")
+# poolA2 = _max_pool(convA2_2, 'pool2')
+# convA3_1 = _conv_layer(poolA2, "conv3_1")
+# convA3_2 = _conv_layer(convA3_1, "conv3_2")
+# convA3_3 = _conv_layer(convA3_2, "conv3_3")
+
+# CNN Image B
+convB1_1 = _conv_layer(bgr_B, "conv1_1")
+convB1_2 = _conv_layer(convB1_1, "conv1_2")
+poolB1 = _max_pool(convB1_2, 'pool1')
+convB2_1 = _conv_layer(poolB1, "conv2_1")
+# convB2_2 = _conv_layer(convB2_1, "conv2_2")
+# poolB2 = _max_pool(convB2_2, 'pool2')
+# convB3_1 = _conv_layer(poolB2, "conv3_1")
+# convB3_2 = _conv_layer(convB3_1, "conv3_2")
+# convB3_3 = _conv_layer(convB3_2, "conv3_3")
+
+# CNN Image F
+convF1_1 = _conv_layer(bgr_F, "conv1_1")
+convF1_2 = _conv_layer(convF1_1, "conv1_2")
+poolF1 = _max_pool(convF1_2, 'pool1')
+convF2_1 = _conv_layer(poolF1, "conv2_1")
+# convF2_2 = _conv_layer(convF2_1, "conv2_2")
+# poolF2 = _max_pool(convF2_2, 'pool2')
+# convF3_1 = _conv_layer(poolF2, "conv3_1")
+# convF3_2 = _conv_layer(convF3_1, "conv3_2")
+# convF3_3 = _conv_layer(convF3_2, "conv3_3")
+
+#A - F feature in conv1_1
+C_A = convA1_1[:,:,:,:]
+C_B = convB1_1[:,:,:,:]
+C_F = convF1_1[:,:,:,:]
+
+# # # A and B's maximum feature
+max_val = tf.maximum(C_A, C_B)
+
+##Calculate Loss maximum feature to F feature
+loss = w_content*tf.reduce_sum(tf.square(max_val - C_F))
+
+#fusedimages gradient
+grads = tf.gradients(loss, img_F)
+
+##open image a ,b, blend
+Image_A = Image.open(ImageA_PATH)
+Image_A = np.asarray(Image_A, dtype='float32')
+Image_A = Image_A.flatten()
+
+Image_B = Image.open(ImageB_PATH)
+Image_B = np.asarray(Image_B, dtype='float32')
+Image_B = Image_B.flatten()
+
+Image_Blend = Image.open(Blend_PATH)
+Image_Blend = np.asarray(Image_Blend, dtype='float32')
+Image_Blend = Image_Blend.flatten()
+
+x = np.copy(Image_Blend)
+
+sess = tf.Session()
+sess.run(tf.global_variables_initializer()) # the local var is for accuracy_op
+#  initialize var in graph
+
+def func(x,*args):
+    Loss, Grads = sess.run(
+        [loss, grads], feed_dict={
+            tf_F: x,
+            tf_A: Image_A,
+            tf_B: Image_B
+        })
+    global flat_grads
+    flat_grads = Grads[0].flatten().astype(np.float64)
+    print(Loss)
+    return Loss
+
+for i in range(n_iter):
+    img, min_val, info = fmin_l_bfgs_b(func, x.flatten(), fprime=lambda x: flat_grads, maxfun=10)
+    x = img.clip(0., 255.)
+    x = x.reshape((height, width))
+    print('(%i/%i) loss: %.1f' % (i + 1, n_iter, min_val))
+
+x = x.reshape((height, width))
+print(x.shape)
+plt.imshow(x, cmap='gray')
+plt.show()
+
+#save image
+# image = x.clip(0, 255).astype(np.uint8)
+# save_name = '_'.join([path.split('/')[-1].split('.')[0] for path in [ImageA_PATH, ImageB_PATH]]) + '.jpeg'
+# Image.fromarray(image).save(''.join([OUTPUT_DIR, save_name]))  # save result
